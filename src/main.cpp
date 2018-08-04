@@ -1,12 +1,12 @@
 #include <fstream>
-#include <math.h>
+#include <cmath>
 #include <uWS/uWS.h>
 #include <chrono>
 #include <iostream>
 #include <thread>
 #include <vector>
-#include "Eigen-3.3/Eigen/Core"
-#include "Eigen-3.3/Eigen/QR"
+#include "Eigen/Core"
+#include "Eigen/QR"
 #include "json.hpp"
 #include "spline.h"
 
@@ -23,10 +23,10 @@ double rad2deg(double x) { return x * 180 / pi(); }
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 // else the empty string "" will be returned.
-string hasData(string s) {
+string hasData(const string& s) {
   auto found_null = s.find("null");
-  auto b1 = s.find_first_of("[");
-  auto b2 = s.find_first_of("}");
+  auto b1 = s.find_first_of('[');
+  auto b2 = s.find_first_of('}');
   if (found_null != string::npos) {
     return "";
   } else if (b1 != string::npos && b2 != string::npos) {
@@ -185,7 +185,7 @@ int main() {
   double max_s = 6945.554;
 
   int lane = 1; // lane number
-  double ref_vel = 49.5;
+  double ref_vel = 0.0;
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
@@ -216,11 +216,11 @@ int main() {
     // The 2 signifies a websocket event
     //auto sdata = string(data).substr(0, length);
     //cout << sdata << endl;
-    if (length && length > 2 && data[0] == '4' && data[1] == '2') {
+    if (length > 2 && data[0] == '4' && data[1] == '2') {
 
       auto s = hasData(data);
 
-      if (s != "") {
+      if (not s.empty()) {
         auto j = json::parse(s);
         
         string event = j[0].get<string>();
@@ -248,11 +248,41 @@ int main() {
 
           	int prev_size = previous_path_x.size();
 
-          	json msgJson;
 
 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+            if (prev_size > 0){
+                car_s = end_path_s;
+            }
+            bool too_close = false;
 
+            for(auto & other_car : sensor_fusion)
+            {
+                float d = other_car[6];
+                if (d < (2 + 4 * lane + 2) && d > 2 + 4 * lane - 2)
+                {
+                    double vx = other_car[3];
+                    double vy = other_car[4];
+                    double check_speed = sqrt( vx * vx + vy * vy);
+                    double check_car_s = other_car[5];
+
+                    check_car_s += (double) prev_size * 0.02 * check_speed;
+                    if ((check_car_s > car_s) && (check_car_s - car_s < 30))
+                    {
+                        //if the car is in front of us
+                        too_close = true;
+                        if (lane  > 0){
+                            lane -= 1;
+                        }
+                    }
+                }
+            }
+
+            if (too_close){
+                ref_vel -= 0.224; //5 m/s^2
+            } else if (ref_vel < 49.5){
+                ref_vel += 0.224;
+            }
 
 
           	vector<double> ptsx;
@@ -359,6 +389,7 @@ int main() {
                 next_y_vals.push_back(y_point);
              }
 
+            json msgJson;
 
             msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
