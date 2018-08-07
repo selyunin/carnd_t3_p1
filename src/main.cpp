@@ -184,8 +184,8 @@ int main() {
   // The max s value before wrapping around the track back to 0
   double max_s = 6945.554;
 
-  int lane = 1; // lane number
-  double ref_vel = 0.0;
+  int my_lane = 1; // my_lane number
+  double my_velocity = 0.0;
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
@@ -209,7 +209,7 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&lane,&ref_vel,&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&my_lane,&my_velocity,&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -248,50 +248,92 @@ int main() {
 
           	int prev_size = previous_path_x.size();
 
-
-
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
             if (prev_size > 0){
                 car_s = end_path_s;
             }
+            bool close = false;
             bool too_close = false;
 
+            bool other_car_ahead = false;
+            bool other_car_left = false;
+            bool other_car_right = false;
+            // sensor fusion part
             for(auto & other_car : sensor_fusion)
             {
-                float d = other_car[6];
-                if (d < (2 + 4 * lane + 2) && d > 2 + 4 * lane - 2)
-                {
-                    double vx = other_car[3];
-                    double vy = other_car[4];
-                    double check_speed = sqrt( vx * vx + vy * vy);
-                    double check_car_s = other_car[5];
+                double other_car_vx = other_car[3];
+                double other_car_vy = other_car[4];
+                double other_car_s = other_car[5];
+                float other_car_d = other_car[6];
+                //! car in our lane
+                if (other_car_d < (2 + 4 * my_lane + 2) and
+                    other_car_d > (2 + 4 * my_lane - 2)) {
 
-                    check_car_s += (double) prev_size * 0.02 * check_speed;
-                    if ((check_car_s > car_s) && (check_car_s - car_s < 30))
-                    {
-                        //if the car is in front of us
-                        too_close = true;
-                        if (lane  > 0){
-                            lane -= 1;
+                    double other_car_speed = sqrt(other_car_vx * other_car_vx +
+                                                  other_car_vy * other_car_vy);
+                    other_car_s += (double) prev_size * 0.02 * other_car_speed;
+                    if ((other_car_s > car_s) and (other_car_s - car_s < 30)) {
+                        close = true;
+                        if (other_car_s - car_s < 6){
+                            too_close = true;
                         }
+                        other_car_ahead = true;
+                    }
+                }
+                //! car in the left lane
+                else if (other_car_d < (2 + 4 * (my_lane-1) + 2) and
+                           other_car_d > (2 + 4 * (my_lane-1) - 2)) {
+                    if (car_s - 30 < other_car_s and car_s + 30 > other_car_s){
+                        other_car_left = true;
+                    }
+                }
+                //! car in the right lane
+                else if (other_car_d < (2 + 4 * (my_lane+1) + 2) and
+                           other_car_d > (2 + 4 * (my_lane+1) - 2)) {
+                    if (car_s - 30 < other_car_s and car_s + 30 > other_car_s){
+                        other_car_right = true;
+                    }
+                }
+            }
+            //! too close to a vehicle --> break
+            if (close){
+                my_velocity -= 0.224; //5 m/s^2
+                if(too_close){
+                    my_velocity -= 0.162; // add more decelleration to avoid collision
+                }
+            }
+            //! keep target velocity
+            else if (my_velocity < 49.5) {
+                my_velocity += 0.224;
+                if (!other_car_ahead and my_velocity< 30){
+                    my_velocity += 0.162;
+                }
+            }
+            //! behavior part -> changing lanes
+            if ( other_car_ahead ) {
+                if ( !other_car_left and my_lane > 0 ) {
+                    // change lane to the left
+                    my_lane--;
+                } else if ( !other_car_right and my_lane < 2 ){
+                    // change lane to the right
+                    my_lane++;
+                }
+            } else {
+                if ( my_lane != 1 ) {
+                    if ( ( my_lane == 0 and !other_car_right ) or
+                         ( my_lane == 2 and !other_car_left  ) ) {
+                        my_lane = 1;
                     }
                 }
             }
 
-            if (too_close){
-                ref_vel -= 0.224; //5 m/s^2
-            } else if (ref_vel < 49.5){
-                ref_vel += 0.224;
-            }
-
-
-          	vector<double> ptsx;
+            vector<double> ptsx;
           	vector<double> ptsy;
 
             double ref_x = car_x;
             double ref_y = car_y;
             double ref_yaw = deg2rad(car_yaw);
 
+            //! previous path is not empty
             if (prev_size < 2){
                 double prev_car_x = car_x - cos(car_yaw);
                 double prev_car_y = car_y - sin(car_yaw);
@@ -318,18 +360,18 @@ int main() {
                 ptsy.push_back(ref_y);
             }
 
-            //add evenly spaced frenet points
-            vector<double> wp0_xy = getXY(car_s + 30, (2 + 4 * lane),
+            //! add evenly space Frenet points for spline approximation
+            vector<double> wp0_xy = getXY(car_s + 30, (2 + 4 * my_lane),
                                           map_waypoints_s,
                                           map_waypoints_x,
                                           map_waypoints_y);
 
-            vector<double> wp1_xy = getXY(car_s + 60, (2 + 4 * lane),
+            vector<double> wp1_xy = getXY(car_s + 60, (2 + 4 * my_lane),
                                           map_waypoints_s,
                                           map_waypoints_x,
                                           map_waypoints_y);
 
-            vector<double> wp2_xy = getXY(car_s + 90, (2 + 4 * lane),
+            vector<double> wp2_xy = getXY(car_s + 90, (2 + 4 * my_lane),
                                           map_waypoints_s,
                                           map_waypoints_x,
                                           map_waypoints_y);
@@ -342,6 +384,7 @@ int main() {
             ptsy.push_back(wp1_xy[1]);
             ptsy.push_back(wp2_xy[1]);
 
+            //! transformation from global coordinates to vehicle coordinates
             for (unsigned idx=0;idx<ptsx.size();++idx){
                 double shift_x = ptsx[idx] - ref_x;
                 double shift_y = ptsy[idx] - ref_y;
@@ -349,14 +392,14 @@ int main() {
                 ptsx[idx] = shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw);
                 ptsy[idx] = shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw);
             }
-            //create a spline
+            //! create a spline
             tk::spline spl;
-
+            //! push x,y points in the local coordinates
             spl.set_points(ptsx, ptsy);
-
+            //! next x,y vals: the updated path
             vector<double> next_x_vals;
             vector<double> next_y_vals;
-
+            //! push existing path
             for(unsigned i=0; i<previous_path_x.size(); ++i){
                 next_x_vals.push_back(previous_path_x[i]);
                 next_y_vals.push_back(previous_path_y[i]);
@@ -367,10 +410,10 @@ int main() {
             double target_dist = sqrt(target_x*target_x + target_y*target_y);
 
             double x_add_on = 0;
-
+            //! compute the remaining points for the next path
             for(unsigned i = 1; i <=50 - previous_path_x.size(); ++i)
             {
-                double N = target_dist / (0.02 * ref_vel / 2.24);
+                double N = target_dist / (0.02 * my_velocity / 2.24);
                 double x_point = x_add_on + target_x / N;
                 double y_point = spl(x_point);
 
@@ -390,7 +433,8 @@ int main() {
              }
 
             json msgJson;
-
+            //! set the path's x,y points to the json message
+            //! (this message will be transferred to the simulator)
             msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
